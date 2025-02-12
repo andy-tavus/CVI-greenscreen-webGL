@@ -2,6 +2,8 @@
 
 This project demonstrates a Tavus feature that enables real-time green screen removal in video calls using WebGL.
 
+[LIVE DEMO](https://andy-tavus.github.io/CVI-greenscreen-webGL/)
+
 ## Features
 - Connects to a video call created via the Tavus API.
 - Subscribes to the existing participant’s (replica’s) video and audio streams.
