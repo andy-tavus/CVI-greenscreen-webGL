@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Daily.js/Tavus - Green Screen Removal</title>
+  <script src="https://unpkg.com/@daily-co/daily-js"></script>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 20px; }
+    #video-container { display: flex; flex-direction: column; align-items: center; margin-top: 20px; }
+    canvas { width: 50%; height: auto; margin: 10px 0; }
+    #color-picker-container { text-align: center; margin-bottom: 10px; }
+  </style>
+</head>
+<body>
+  <h1>Daily.js/Tavus</h1>
+  <h2>Subscribe to Replica's Video & Audio Streams</h2>
+  
+  <!-- Color picker for changing the background color of the page -->
+  <div id="color-picker-container">
+    <label for="color-picker">Select Background Color:</label>
+    <input type="color" id="color-picker" value="#ffffff">
+  </div>
+  
+  <!-- Input for entering the Daily room URL -->
+  <label for="room-url">Enter Room URL:</label>
+  <input type="text" id="room-url" placeholder="https://tavus.daily.co/c123456abcde" style="width: 300px;">
+  <button id="join-btn">JOIN</button>
+  
+  <div id="video-container">
+    <canvas id="canvas"></canvas>
+  </div>
+  
+  <script>
+    let callObject = null;
+    const video = document.createElement('video');
+    video.autoplay = true;
+    video.playsInline = true;
+    video.style.display = 'none'; // Hide the video element as we process it via WebGL
+    document.body.appendChild(video);
+
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    const colorPicker = document.getElementById('color-picker');
+    
+    // Event listener to change the background color based on user selection
+    colorPicker.addEventListener('input', (event) => {
+      document.body.style.backgroundColor = event.target.value;
+    });
+    
+    document.getElementById('join-btn').addEventListener('click', async () => {
+      const roomUrl = document.getElementById('room-url').value;
+      if (!roomUrl) {
+        alert('Please enter a valid room URL.');
+        return;
+      }
+
+      // Create a Daily.co call object to manage the video conference
+      callObject = DailyIframe.createCallObject();
+      try {
+        await callObject.join({ url: roomUrl, userName: "Local" });
+        console.log('Joined the call successfully');
+        setTimeout(checkForExistingParticipant, 1500);
+      } catch (error) {
+        console.error('Error joining the call:', error);
+        alert('Failed to join the call. Please check the room URL.');
+      }
+    });
+
+    // Function to check if an existing participant (the replica) is in the call
+    function checkForExistingParticipant() {
+      const participants = callObject.participants();
+      const existingParticipant = Object.values(participants).find(p => !p.local);
+      
+      if (existingParticipant) {
+        console.log(`Existing participant found: ${existingParticipant.user_id}`);
+        
+        // Subscribe to the replica's video track and set it as the video source
+        if (existingParticipant.tracks.video.state === 'playable') {
+          video.srcObject = new MediaStream([existingParticipant.tracks.video.persistentTrack]);
+          video.onloadedmetadata = () => applyGreenScreen();
+        }
+        
+        // Subscribe to the replica's audio track to ensure we can hear them
+        if (existingParticipant.tracks.audio.state === 'playable') {
+          const audio = new Audio();
+          audio.srcObject = new MediaStream([existingParticipant.tracks.audio.persistentTrack]);
+          audio.autoplay = true;
+        }
+      }
+    }
+
+    // Function to apply WebGL-based green screen removal
+    function applyGreenScreen() {
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      
+      function renderFrame() {
+        if (!video.videoWidth || !video.videoHeight) {
+          requestAnimationFrame(renderFrame);
+          return;
+        }
+        
+        // Draw the current frame from the video onto the canvas
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        
+        // Extract pixel data from the canvas
+        const frame = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const pixels = frame.data;
+        
+        // Iterate through all pixels and check for the green screen color
+        for (let i = 0; i < pixels.length; i += 4) {
+          const r = pixels[i], g = pixels[i + 1], b = pixels[i + 2];
+          
+          // If the pixel color is close to the specified green screen color, make it transparent
+          if (Math.abs(r - 0) < 40 && Math.abs(g - 255) < 40 && Math.abs(b - 155) < 40) { 
+            pixels[i + 3] = 0; // Set alpha channel to 0 (fully transparent)
+          }
+        }
+        
+        // Put the modified pixel data back onto the canvas
+        ctx.putImageData(frame, 0, 0);
+        
+        // Continue processing the next frame
+        requestAnimationFrame(renderFrame);
+      }
+      renderFrame();
+    }
+  </script>
+</body>
+</html>
