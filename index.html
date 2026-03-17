@@ -41,6 +41,45 @@
     </label>
     <input type="color" id="chroma-key-picker" value="#00ff9b" style="width: 36px; height: 28px; cursor: pointer; opacity: 0.5; pointer-events: none;" title="Chroma key color (enable override to change)">
   </div>
+  <fieldset id="edge-effects-panel" style="margin: 12px 0; padding: 10px; max-width: 520px;">
+    <legend style="font-weight: 600;">Edge effects (Tavus default green only)</legend>
+    <p style="margin: 0 0 8px 0; font-size: 0.9em; color: #444;">Adjust these while on a call to reduce green fringe and halos. Disable override above to use.</p>
+    <div style="display: grid; gap: 8px;">
+      <label style="display: flex; align-items: center; gap: 8px;">
+        <input type="checkbox" id="edge-premultiply" checked>
+        <span>Premultiply alpha (fixes white/light outline on colored backgrounds)</span>
+      </label>
+      <label style="display: flex; align-items: center; gap: 8px;">
+        <input type="checkbox" id="edge-brightness-gate" checked>
+        <span>Brightness gating (preserve dark pixels e.g. hair)</span>
+      </label>
+      <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+        <span style="min-width: 140px;">Brightness range:</span>
+        <input type="range" id="edge-brightness-low" min="0" max="100" value="35" style="width: 80px;">
+        <span id="edge-brightness-low-val">0.35</span>
+        <span>–</span>
+        <input type="range" id="edge-brightness-high" min="0" max="100" value="45" style="width: 80px;">
+        <span id="edge-brightness-high-val">0.45</span>
+      </div>
+      <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+        <span style="min-width: 140px;">Chroma key sensitivity:</span>
+        <input type="range" id="edge-chroma-low" min="0" max="100" value="2" style="width: 80px;">
+        <span id="edge-chroma-low-val">0.02</span>
+        <span>–</span>
+        <input type="range" id="edge-chroma-high" min="0" max="100" value="25" style="width: 80px;">
+        <span id="edge-chroma-high-val">0.25</span>
+      </div>
+      <label style="display: flex; align-items: center; gap: 8px;">
+        <input type="checkbox" id="edge-spill-suppress" checked>
+        <span>Green spill suppression</span>
+      </label>
+      <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+        <span style="min-width: 140px;">Spill amount:</span>
+        <input type="range" id="edge-spill-amount" min="0" max="30" value="6" style="width: 100px;">
+        <span id="edge-spill-amount-val">0.06</span>
+      </div>
+    </div>
+  </fieldset>
   <div id="video-container">
     <canvas id="canvas"></canvas>
   </div>
@@ -94,6 +133,105 @@
       customChromaKey = hexToRgb(e.target.value);
       updateChromaSwatch();
     });
+
+    // Edge effect controls (only apply when using green-fringe shader)
+    const edgePremultiply = document.getElementById('edge-premultiply');
+    const edgeBrightnessGate = document.getElementById('edge-brightness-gate');
+    const edgeBrightnessLow = document.getElementById('edge-brightness-low');
+    const edgeBrightnessHigh = document.getElementById('edge-brightness-high');
+    const edgeBrightnessLowVal = document.getElementById('edge-brightness-low-val');
+    const edgeBrightnessHighVal = document.getElementById('edge-brightness-high-val');
+    const edgeChromaLow = document.getElementById('edge-chroma-low');
+    const edgeChromaHigh = document.getElementById('edge-chroma-high');
+    const edgeChromaLowVal = document.getElementById('edge-chroma-low-val');
+    const edgeChromaHighVal = document.getElementById('edge-chroma-high-val');
+    const edgeSpillSuppress = document.getElementById('edge-spill-suppress');
+    const edgeSpillAmount = document.getElementById('edge-spill-amount');
+    const edgeSpillAmountVal = document.getElementById('edge-spill-amount-val');
+
+    function updateEdgeSliderLabels() {
+      edgeBrightnessLowVal.textContent = (edgeBrightnessLow.value / 100).toFixed(2);
+      edgeBrightnessHighVal.textContent = (edgeBrightnessHigh.value / 100).toFixed(2);
+      edgeChromaLowVal.textContent = (edgeChromaLow.value / 100).toFixed(2);
+      edgeChromaHighVal.textContent = (edgeChromaHigh.value / 100).toFixed(2);
+      edgeSpillAmountVal.textContent = (edgeSpillAmount.value / 100).toFixed(2);
+    }
+    edgeBrightnessLow.addEventListener('input', updateEdgeSliderLabels);
+    edgeBrightnessHigh.addEventListener('input', updateEdgeSliderLabels);
+    edgeChromaLow.addEventListener('input', updateEdgeSliderLabels);
+    edgeChromaHigh.addEventListener('input', updateEdgeSliderLabels);
+    edgeSpillAmount.addEventListener('input', updateEdgeSliderLabels);
+
+    function getEdgeParams() {
+      return {
+        premultiplyAlpha: edgePremultiply.checked,
+        brightnessGate: edgeBrightnessGate.checked,
+        brightnessLow: edgeBrightnessLow.value / 100,
+        brightnessHigh: edgeBrightnessHigh.value / 100,
+        chromaLow: edgeChromaLow.value / 100,
+        chromaHigh: edgeChromaHigh.value / 100,
+        spillSuppress: edgeSpillSuppress.checked,
+        spillAmount: edgeSpillAmount.value / 100
+      };
+    }
+
+    /**
+     * Exposed for integration: read or write greenscreen settings so you can replicate
+     * the same effects in your own app or persist/restore user tweaks.
+     * @returns {{
+     *   chromaKeyOverride: boolean,
+     *   chromaKeyColor: { r: number, g: number, b: number },
+     *   premultiplyAlpha: boolean,
+     *   brightnessGate: boolean,
+     *   brightnessLow: number,
+     *   brightnessHigh: number,
+     *   chromaLow: number,
+     *   chromaHigh: number,
+     *   spillSuppress: boolean,
+     *   spillAmount: number
+     * }}
+     */
+    function getGreenscreenSettings() {
+      const chroma = getChromaKeyColor();
+      return {
+        chromaKeyOverride: overrideChromaCheckbox.checked,
+        chromaKeyColor: { r: chroma.r, g: chroma.g, b: chroma.b },
+        ...getEdgeParams()
+      };
+    }
+
+    /**
+     * Apply settings from getGreenscreenSettings() (e.g. restored from storage or your app config).
+     * Only provided keys are applied; others keep current UI state.
+     * @param {Partial<ReturnType<typeof getGreenscreenSettings>>} settings
+     */
+    function setGreenscreenSettings(settings) {
+      if (!settings) return;
+      if (typeof settings.chromaKeyOverride === 'boolean') {
+        overrideChromaCheckbox.checked = settings.chromaKeyOverride;
+        chromaKeyPicker.style.opacity = settings.chromaKeyOverride ? '1' : '0.5';
+        chromaKeyPicker.style.pointerEvents = settings.chromaKeyOverride ? 'auto' : 'none';
+      }
+      if (settings.chromaKeyColor) {
+        customChromaKey = { r: settings.chromaKeyColor.r, g: settings.chromaKeyColor.g, b: settings.chromaKeyColor.b };
+        chromaKeyPicker.value = '#' + [customChromaKey.r, customChromaKey.g, customChromaKey.b].map(x => x.toString(16).padStart(2, '0')).join('');
+        updateChromaSwatch();
+      }
+      if (typeof settings.premultiplyAlpha === 'boolean') edgePremultiply.checked = settings.premultiplyAlpha;
+      if (typeof settings.brightnessGate === 'boolean') edgeBrightnessGate.checked = settings.brightnessGate;
+      if (typeof settings.brightnessLow === 'number') edgeBrightnessLow.value = Math.round(settings.brightnessLow * 100);
+      if (typeof settings.brightnessHigh === 'number') edgeBrightnessHigh.value = Math.round(settings.brightnessHigh * 100);
+      if (typeof settings.chromaLow === 'number') edgeChromaLow.value = Math.round(settings.chromaLow * 100);
+      if (typeof settings.chromaHigh === 'number') edgeChromaHigh.value = Math.round(settings.chromaHigh * 100);
+      if (typeof settings.spillSuppress === 'boolean') edgeSpillSuppress.checked = settings.spillSuppress;
+      if (typeof settings.spillAmount === 'number') edgeSpillAmount.value = Math.round(settings.spillAmount * 100);
+      updateEdgeSliderLabels();
+    }
+
+    window.TavusGreenscreen = {
+      getSettings: getGreenscreenSettings,
+      setSettings: setGreenscreenSettings
+    };
 
     // Event listener to change page background color dynamically
     colorPicker.addEventListener('input', (event) => {
@@ -155,18 +293,33 @@
     const FRAGMENT_SHADER_GREEN_FRINGE = `
       precision mediump float;
       uniform sampler2D u_texture;
+      uniform float u_brightnessGate;
+      uniform float u_brightnessLow;
+      uniform float u_brightnessHigh;
+      uniform float u_chromaLow;
+      uniform float u_chromaHigh;
+      uniform float u_spillSuppress;
+      uniform float u_spillAmount;
+      uniform float u_premultiplyAlpha;
       varying vec2 v_texCoord;
       void main() {
         vec4 color = texture2D(u_texture, v_texCoord);
         float maxRB = max(color.r, color.b);
         float greenDominance = color.g - maxRB;
         float brightness = dot(color.rgb, vec3(0.299, 0.587, 0.114));
-        float chromaKey = smoothstep(0.02, 0.25, greenDominance);
-        float brightnessGate = smoothstep(0.35, 0.45, brightness);
+        float chromaKey = smoothstep(u_chromaLow, u_chromaHigh, greenDominance);
+        float brightnessGate = u_brightnessGate > 0.5
+          ? smoothstep(u_brightnessLow, u_brightnessHigh, brightness) : 1.0;
         float alpha = 1.0 - (chromaKey * brightnessGate);
-        float spillSuppress = smoothstep(0.0, 0.15, greenDominance);
-        color.g = mix(color.g, min(color.g, maxRB + 0.06), spillSuppress);
-        gl_FragColor = vec4(color.rgb, alpha);
+        if (u_spillSuppress > 0.5) {
+          float spillSuppress = smoothstep(0.0, 0.15, greenDominance);
+          color.g = mix(color.g, min(color.g, maxRB + u_spillAmount), spillSuppress);
+        }
+        if (u_premultiplyAlpha > 0.5) {
+          gl_FragColor = vec4(color.rgb * alpha, alpha);
+        } else {
+          gl_FragColor = vec4(color.rgb, alpha);
+        }
       }
     `;
     const FRAGMENT_SHADER_SIMPLE_KEY = `
@@ -174,12 +327,17 @@
       uniform sampler2D u_texture;
       uniform vec3 u_keyColor;
       uniform float u_tolerance;
+      uniform float u_premultiplyAlpha;
       varying vec2 v_texCoord;
       void main() {
         vec4 color = texture2D(u_texture, v_texCoord);
         float dist = length(color.rgb - u_keyColor);
         float alpha = 1.0 - smoothstep(0.0, u_tolerance, dist);
-        gl_FragColor = vec4(color.rgb, alpha);
+        if (u_premultiplyAlpha > 0.5) {
+          gl_FragColor = vec4(color.rgb * alpha, alpha);
+        } else {
+          gl_FragColor = vec4(color.rgb, alpha);
+        }
       }
     `;
 
@@ -269,10 +427,22 @@
       gl.bindTexture(gl.TEXTURE_2D, webglTexture);
       gl.uniform1i(gl.getUniformLocation(program, 'u_texture'), 0);
 
+      const premult = edgePremultiply.checked ? 1 : 0;
       if (override) {
         const key = getChromaKeyColor();
         gl.uniform3f(gl.getUniformLocation(program, 'u_keyColor'), key.r / 255, key.g / 255, key.b / 255);
         gl.uniform1f(gl.getUniformLocation(program, 'u_tolerance'), 40 / 255);
+        gl.uniform1f(gl.getUniformLocation(program, 'u_premultiplyAlpha'), premult);
+      } else {
+        const ep = getEdgeParams();
+        gl.uniform1f(gl.getUniformLocation(program, 'u_brightnessGate'), ep.brightnessGate ? 1 : 0);
+        gl.uniform1f(gl.getUniformLocation(program, 'u_brightnessLow'), ep.brightnessLow);
+        gl.uniform1f(gl.getUniformLocation(program, 'u_brightnessHigh'), ep.brightnessHigh);
+        gl.uniform1f(gl.getUniformLocation(program, 'u_chromaLow'), ep.chromaLow);
+        gl.uniform1f(gl.getUniformLocation(program, 'u_chromaHigh'), ep.chromaHigh);
+        gl.uniform1f(gl.getUniformLocation(program, 'u_spillSuppress'), ep.spillSuppress ? 1 : 0);
+        gl.uniform1f(gl.getUniformLocation(program, 'u_spillAmount'), ep.spillAmount);
+        gl.uniform1f(gl.getUniformLocation(program, 'u_premultiplyAlpha'), premult);
       }
 
       gl.clearColor(0, 0, 0, 0);
