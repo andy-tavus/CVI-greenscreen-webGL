@@ -29,6 +29,18 @@
     <label for="color-picker">Select Page Background Color:</label>
     <input type="color" id="color-picker" value="#ffffff">
   </div>
+  <div id="chroma-key-container" style="display: flex; align-items: center; gap: 12px; margin: 12px 0; flex-wrap: wrap;">
+    <span style="display: flex; align-items: center; gap: 6px;">
+      <span style="font-weight: 600;">Chroma key color:</span>
+      <span id="chroma-key-swatch" style="display: inline-block; width: 24px; height: 24px; border: 1px solid #333; border-radius: 4px; background: rgb(0, 255, 155);"></span>
+      <span id="chroma-key-rgb" style="font-family: monospace; font-size: 0.9em;">rgb(0, 255, 155)</span>
+    </span>
+    <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
+      <input type="checkbox" id="override-chroma-checkbox">
+      <span>Override Tavus Default Chroma Key Color</span>
+    </label>
+    <input type="color" id="chroma-key-picker" value="#00ff9b" style="width: 36px; height: 28px; cursor: pointer; opacity: 0.5; pointer-events: none;" title="Chroma key color (enable override to change)">
+  </div>
   <div id="video-container">
     <canvas id="canvas"></canvas>
   </div>
@@ -42,9 +54,47 @@
     document.body.appendChild(video);
 
     const canvas = document.getElementById('canvas');
-    const ctx = canvas.getContext('2d');
+    const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
     const colorPicker = document.getElementById('color-picker');
-    
+    const chromaKeySwatch = document.getElementById('chroma-key-swatch');
+    const chromaKeyRgb = document.getElementById('chroma-key-rgb');
+    const overrideChromaCheckbox = document.getElementById('override-chroma-checkbox');
+    const chromaKeyPicker = document.getElementById('chroma-key-picker');
+
+    // Tavus default chroma key color (green used by apply_greenscreen)
+    const TAVUS_DEFAULT_CHROMA = { r: 0, g: 255, b: 155 };
+    let customChromaKey = { r: 0, g: 255, b: 155 };
+
+    function getChromaKeyColor() {
+      return overrideChromaCheckbox.checked ? customChromaKey : TAVUS_DEFAULT_CHROMA;
+    }
+
+    function hexToRgb(hex) {
+      const n = parseInt(hex.slice(1), 16);
+      return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
+    }
+
+    function rgbToCss(rgb) {
+      return `rgb(${rgb.r}, ${rgb.g}, ${rgb.b})`;
+    }
+
+    function updateChromaSwatch() {
+      const rgb = getChromaKeyColor();
+      chromaKeySwatch.style.background = rgbToCss(rgb);
+      chromaKeyRgb.textContent = `rgb(${rgb.r}, ${rgb.g}, ${rgb.b})`;
+    }
+
+    overrideChromaCheckbox.addEventListener('change', () => {
+      chromaKeyPicker.style.opacity = overrideChromaCheckbox.checked ? '1' : '0.5';
+      chromaKeyPicker.style.pointerEvents = overrideChromaCheckbox.checked ? 'auto' : 'none';
+      updateChromaSwatch();
+    });
+
+    chromaKeyPicker.addEventListener('input', (e) => {
+      customChromaKey = hexToRgb(e.target.value);
+      updateChromaSwatch();
+    });
+
     // Event listener to change page background color dynamically
     colorPicker.addEventListener('input', (event) => {
       document.body.style.backgroundColor = event.target.value;
@@ -92,35 +142,155 @@
       }
     }
 
-    // Function to apply chroma key transparency using WebGL
-    function applyGreenScreen() {
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
-      
-      function renderFrame() {
-        if (!video.videoWidth || !video.videoHeight) {
-          requestAnimationFrame(renderFrame);
-          return;
-        }
-        
-        // Draw the current video frame onto the canvas
-        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-        
-        // Extract pixel data and apply transparency to green pixels
-        const frame = ctx.getImageData(0, 0, canvas.width, canvas.height);
-        const pixels = frame.data;
-        for (let i = 0; i < pixels.length; i += 4) {
-          const r = pixels[i], g = pixels[i + 1], b = pixels[i + 2];
-          if (Math.abs(r - 0) < 40 && Math.abs(g - 255) < 40 && Math.abs(b - 155) < 40) { // Adjust tolerance
-            pixels[i + 3] = 0; // Set alpha transparency
-          }
-        }
-        
-        // Update the canvas with processed frame data
-        ctx.putImageData(frame, 0, 0);
-        requestAnimationFrame(renderFrame);
+    // --- WebGL green edge reduction (Tavus default) + simple key (override) ---
+    const VERTEX_SHADER_SRC = `
+      attribute vec2 a_position;
+      attribute vec2 a_texCoord;
+      varying vec2 v_texCoord;
+      void main() {
+        gl_Position = vec4(a_position, 0.0, 1.0);
+        v_texCoord = a_texCoord;
       }
-      renderFrame();
+    `;
+    const FRAGMENT_SHADER_GREEN_FRINGE = `
+      precision mediump float;
+      uniform sampler2D u_texture;
+      varying vec2 v_texCoord;
+      void main() {
+        vec4 color = texture2D(u_texture, v_texCoord);
+        float maxRB = max(color.r, color.b);
+        float greenDominance = color.g - maxRB;
+        float brightness = dot(color.rgb, vec3(0.299, 0.587, 0.114));
+        float chromaKey = smoothstep(0.02, 0.25, greenDominance);
+        float brightnessGate = smoothstep(0.35, 0.45, brightness);
+        float alpha = 1.0 - (chromaKey * brightnessGate);
+        float spillSuppress = smoothstep(0.0, 0.15, greenDominance);
+        color.g = mix(color.g, min(color.g, maxRB + 0.06), spillSuppress);
+        gl_FragColor = vec4(color.rgb, alpha);
+      }
+    `;
+    const FRAGMENT_SHADER_SIMPLE_KEY = `
+      precision mediump float;
+      uniform sampler2D u_texture;
+      uniform vec3 u_keyColor;
+      uniform float u_tolerance;
+      varying vec2 v_texCoord;
+      void main() {
+        vec4 color = texture2D(u_texture, v_texCoord);
+        float dist = length(color.rgb - u_keyColor);
+        float alpha = 1.0 - smoothstep(0.0, u_tolerance, dist);
+        gl_FragColor = vec4(color.rgb, alpha);
+      }
+    `;
+
+    function createShader(gl, type, src) {
+      const shader = gl.createShader(type);
+      gl.shaderSource(shader, src);
+      gl.compileShader(shader);
+      if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+        console.error(gl.getShaderInfoLog(shader));
+        gl.deleteShader(shader);
+        return null;
+      }
+      return shader;
+    }
+
+    function createProgram(gl, vsSrc, fsSrc) {
+      const vs = createShader(gl, gl.VERTEX_SHADER, vsSrc);
+      const fs = createShader(gl, gl.FRAGMENT_SHADER, fsSrc);
+      if (!vs || !fs) return null;
+      const program = gl.createProgram();
+      gl.attachShader(program, vs);
+      gl.attachShader(program, fs);
+      gl.linkProgram(program);
+      if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+        console.error(gl.getProgramInfoLog(program));
+        return null;
+      }
+      return program;
+    }
+
+    let webglProgramGreenFringe = null;
+    let webglProgramSimpleKey = null;
+    let webglTexture = null;
+    let webglBuffer = null;
+
+    function initWebGL() {
+      if (!gl) return false;
+      webglProgramGreenFringe = createProgram(gl, VERTEX_SHADER_SRC, FRAGMENT_SHADER_GREEN_FRINGE);
+      webglProgramSimpleKey = createProgram(gl, VERTEX_SHADER_SRC, FRAGMENT_SHADER_SIMPLE_KEY);
+      if (!webglProgramGreenFringe || !webglProgramSimpleKey) return false;
+      const positions = new Float32Array([-1, -1, 1, -1, -1, 1, -1, 1, 1, -1, 1, 1]);
+      const coords = new Float32Array([0, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 0]);
+      webglBuffer = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, webglBuffer);
+      gl.bufferData(gl.ARRAY_BUFFER, positions.length * 4 + coords.length * 4, gl.STATIC_DRAW);
+      gl.bufferSubData(gl.ARRAY_BUFFER, 0, positions);
+      gl.bufferSubData(gl.ARRAY_BUFFER, positions.length * 4, coords);
+      webglTexture = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, webglTexture);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      return true;
+    }
+
+    function renderFrameWebGL() {
+      if (!video.videoWidth || !video.videoHeight) {
+        requestAnimationFrame(renderFrameWebGL);
+        return;
+      }
+      const w = video.videoWidth;
+      const h = video.videoHeight;
+      if (canvas.width !== w || canvas.height !== h) {
+        canvas.width = w;
+        canvas.height = h;
+        gl.viewport(0, 0, w, h);
+      }
+      gl.bindTexture(gl.TEXTURE_2D, webglTexture);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
+
+      const override = overrideChromaCheckbox.checked;
+      const program = override ? webglProgramSimpleKey : webglProgramGreenFringe;
+      gl.useProgram(program);
+
+      const posLoc = gl.getAttribLocation(program, 'a_position');
+      const texLoc = gl.getAttribLocation(program, 'a_texCoord');
+      const posOffset = 0;
+      const texOffset = 12 * 4;
+      gl.bindBuffer(gl.ARRAY_BUFFER, webglBuffer);
+      gl.enableVertexAttribArray(posLoc);
+      gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, posOffset);
+      gl.enableVertexAttribArray(texLoc);
+      gl.vertexAttribPointer(texLoc, 2, gl.FLOAT, false, 0, texOffset);
+
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, webglTexture);
+      gl.uniform1i(gl.getUniformLocation(program, 'u_texture'), 0);
+
+      if (override) {
+        const key = getChromaKeyColor();
+        gl.uniform3f(gl.getUniformLocation(program, 'u_keyColor'), key.r / 255, key.g / 255, key.b / 255);
+        gl.uniform1f(gl.getUniformLocation(program, 'u_tolerance'), 40 / 255);
+      }
+
+      gl.clearColor(0, 0, 0, 0);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+      requestAnimationFrame(renderFrameWebGL);
+    }
+
+    function applyGreenScreen() {
+      if (!gl) {
+        console.error('WebGL not supported');
+        return;
+      }
+      if (!initWebGL()) {
+        console.error('WebGL shader init failed');
+        return;
+      }
+      renderFrameWebGL();
     }
   </script>
 </body>
